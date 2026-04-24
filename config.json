@@ -6,5 +6,10 @@
   "compile_on_exit": true,
   "video_fps": 24,
   "frame_format": "jpg",
-  "jpeg_quality": 95
+  "jpeg_quality": 95,
+  "webdav": {
+    "hostname": "https://my-hdd-1.keenetic.link",
+    "root": "/webdav/",
+    "remote_dir": "timelapse"
+  }
 }
