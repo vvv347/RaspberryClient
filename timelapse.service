@@ -1,0 +1,15 @@
+[Unit]
+Description=Time-lapse Recorder (LifeCam Studio)
+After=multi-user.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/RaspberryClient
+ExecStart=/usr/bin/python3 /home/pi/RaspberryClient/timelapse.py
+ExecStop=/bin/kill -SIGTERM $MAINPID
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target

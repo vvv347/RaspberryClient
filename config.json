@@ -1,0 +1,10 @@
+{
+  "camera_device": 0,
+  "interval": 5.0,
+  "resolution": [1920, 1080],
+  "output_dir": "output",
+  "compile_on_exit": true,
+  "video_fps": 24,
+  "frame_format": "jpg",
+  "jpeg_quality": 95
+}
