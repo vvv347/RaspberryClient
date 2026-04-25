@@ -17,6 +17,9 @@ import cv2
 
 from webdav_uploader import WebDAVUploader
 
+from dotenv import load_dotenv
+
+
 
 def setup_logging(debug: bool = False) -> None:
     logging.basicConfig(
@@ -226,6 +229,8 @@ def main() -> None:
         config["compile_on_exit"] = False
     if args.no_webdav:
         config.pop("webdav", None)
+    
+    load_dotenv()
 
     recorder = TimelapseRecorder(config)
     signal.signal(signal.SIGTERM, lambda _s, _f: recorder.stop())
