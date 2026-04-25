@@ -15,10 +15,9 @@ from typing import Optional
 
 import cv2
 
-from webdav_uploader import WebDAVUploader
-
 from dotenv import load_dotenv
 
+from webdav_uploader import WebDAVUploader
 
 
 def setup_logging(debug: bool = False) -> None:
@@ -214,6 +213,7 @@ def main() -> None:
     parser.add_argument("--debug", action="store_true", help="Verbose logging")
     args = parser.parse_args()
 
+    load_dotenv()
     setup_logging(args.debug)
 
     config = load_config(args.config)
@@ -229,8 +229,6 @@ def main() -> None:
         config["compile_on_exit"] = False
     if args.no_webdav:
         config.pop("webdav", None)
-    
-    load_dotenv()
 
     recorder = TimelapseRecorder(config)
     signal.signal(signal.SIGTERM, lambda _s, _f: recorder.stop())

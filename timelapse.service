@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=pi
+User=vvv347
 WorkingDirectory=/home/vvv347/RaspberryClient/
 EnvironmentFile=/home/vvv347/RaspberryClient/.env
 ExecStart=/usr/bin/python3 /home/vvv347/RaspberryClient/timelapse.py
