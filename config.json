@@ -1,5 +1,5 @@
 {
-  "camera_device": 0,
+  "camera_device": "/dev/video0",
   "interval": 5.0,
   "resolution": [1920, 1080],
   "output_dir": "output",

@@ -79,11 +79,30 @@ class TimelapseRecorder:
         except ValueError as exc:
             logging.warning("WebDAV disabled: %s", exc)
 
+    @staticmethod
+    def _find_camera_device(device) -> str:
+        """Resolve integer index to /dev/videoN path, scanning if needed."""
+        if isinstance(device, str):
+            return device
+        # Try the direct path first
+        path = f"/dev/video{device}"
+        if Path(path).exists():
+            return path
+        # Scan for any available video device
+        candidates = sorted(Path("/dev").glob("video*"))
+        if candidates:
+            found = str(candidates[0])
+            logging.warning("Device %s not found, using %s", path, found)
+            return found
+        raise RuntimeError("No video devices found in /dev/video*")
+
     def _open_camera(self) -> None:
-        device = self.config["camera_device"]
+        device = self._find_camera_device(self.config["camera_device"])
         self.cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
         if not self.cap.isOpened():
-            raise RuntimeError(f"Cannot open camera: {device}")
+            candidates = sorted(Path("/dev").glob("video*"))
+            hint = f" Available: {[str(c) for c in candidates]}" if candidates else ""
+            raise RuntimeError(f"Cannot open camera: {device}.{hint}")
 
         w, h = self.config["resolution"]
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
