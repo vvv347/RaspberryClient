@@ -2,10 +2,12 @@
 """Time-lapse recorder for Microsoft LifeCam Studio on Raspberry Pi 4."""
 
 import argparse
+import fcntl
 import json
 import logging
 import os
 import signal
+import struct
 import subprocess
 import sys
 import time
@@ -80,29 +82,41 @@ class TimelapseRecorder:
             logging.warning("WebDAV disabled: %s", exc)
 
     @staticmethod
+    @staticmethod
+    def _is_capture_device(path: str) -> bool:
+        """Check V4L2_CAP_VIDEO_CAPTURE via VIDIOC_QUERYCAP ioctl."""
+        # struct v4l2_capability: driver[16] + card[32] + bus_info[32] + version(4) + capabilities(4) = offset 84
+        try:
+            with open(path, "rb") as f:
+                buf = bytearray(104)
+                fcntl.ioctl(f, 0x80685600, buf)  # VIDIOC_QUERYCAP
+                caps = struct.unpack_from("<I", buf, 84)[0]
+                return bool(caps & 0x00000001)    # V4L2_CAP_VIDEO_CAPTURE
+        except OSError:
+            return False
+
+    @staticmethod
     def _find_camera_device(device) -> str:
-        """Resolve integer index to /dev/videoN path, scanning if needed."""
-        if isinstance(device, str):
-            return device
-        # Try the direct path first
-        path = f"/dev/video{device}"
-        if Path(path).exists():
-            return path
-        # Scan for any available video device
-        candidates = sorted(Path("/dev").glob("video*"))
-        if candidates:
-            found = str(candidates[0])
-            logging.warning("Device %s not found, using %s", path, found)
-            return found
-        raise RuntimeError("No video devices found in /dev/video*")
+        preferred = f"/dev/video{device}" if isinstance(device, int) else device
+        all_nodes = sorted(Path("/dev").glob("video*"))
+        capture_nodes = [str(p) for p in all_nodes if TimelapseRecorder._is_capture_device(str(p))]
+
+        if not capture_nodes:
+            raise RuntimeError(
+                f"No V4L2 capture devices found. Nodes present: {[str(p) for p in all_nodes]}"
+            )
+        if preferred in capture_nodes:
+            return preferred
+
+        chosen = capture_nodes[0]
+        logging.warning("'%s' is not a capture device, using '%s'", preferred, chosen)
+        return chosen
 
     def _open_camera(self) -> None:
         device = self._find_camera_device(self.config["camera_device"])
         self.cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
         if not self.cap.isOpened():
-            candidates = sorted(Path("/dev").glob("video*"))
-            hint = f" Available: {[str(c) for c in candidates]}" if candidates else ""
-            raise RuntimeError(f"Cannot open camera: {device}.{hint}")
+            raise RuntimeError(f"Cannot open camera: {device}")
 
         w, h = self.config["resolution"]
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
