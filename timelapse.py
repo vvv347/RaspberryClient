@@ -79,32 +79,53 @@ class TimelapseRecorder:
 
     @staticmethod
     def _is_capture_device(path: str) -> bool:
-        """Return True if the V4L2 node supports VIDEO_CAPTURE (VIDIOC_QUERYCAP)."""
-        # struct v4l2_capability layout: driver[16] card[32] bus_info[32] version(4) capabilities(4)
+        """VIDIOC_QUERYCAP via O_RDWR|O_NONBLOCK — required by V4L2 spec."""
+        # struct v4l2_capability: driver[16] card[32] bus_info[32] version(4) capabilities(4)
         try:
-            with open(path, "rb") as f:
+            fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+            try:
                 buf = bytearray(104)
-                fcntl.ioctl(f, 0x80685600, buf)          # VIDIOC_QUERYCAP
+                fcntl.ioctl(fd, 0x80685600, buf)           # VIDIOC_QUERYCAP
                 caps = struct.unpack_from("<I", buf, 84)[0]
-                return bool(caps & 0x00000001)             # V4L2_CAP_VIDEO_CAPTURE
+                return bool(caps & 0x00000001)              # V4L2_CAP_VIDEO_CAPTURE
+            finally:
+                os.close(fd)
         except OSError:
             return False
+
+    @staticmethod
+    def _ffmpeg_probe(path: str) -> bool:
+        """Fallback: attempt to grab one frame with ffmpeg."""
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-f", "v4l2", "-i", path, "-frames:v", "1", "-f", "null", "-"],
+            capture_output=True, timeout=8,
+        )
+        return r.returncode == 0
 
     @staticmethod
     def _find_camera_device(device) -> str:
         preferred = f"/dev/video{device}" if isinstance(device, int) else device
         all_nodes = sorted(Path("/dev").glob("video*"), key=lambda p: int(p.name[5:]))
+
         capture_nodes = [str(p) for p in all_nodes if TimelapseRecorder._is_capture_device(str(p))]
 
         if not capture_nodes:
+            logging.warning("ioctl probe found nothing — falling back to ffmpeg probe (may take a moment)")
+            capture_nodes = [str(p) for p in all_nodes if TimelapseRecorder._ffmpeg_probe(str(p))]
+
+        if not capture_nodes:
             raise RuntimeError(
-                f"No V4L2 capture devices found. Nodes present: {[str(p) for p in all_nodes]}"
+                "No usable V4L2 capture device found.\n"
+                "If you see permission errors, run:\n"
+                "  sudo usermod -aG video $USER  && newgrp video\n"
+                f"Nodes checked: {[str(p) for p in all_nodes]}"
             )
+
         if preferred in capture_nodes:
             return preferred
 
         chosen = capture_nodes[0]
-        logging.warning("'%s' is not a capture device — using '%s'", preferred, chosen)
+        logging.warning("'%s' not usable — using '%s'", preferred, chosen)
         return chosen
 
     def _open_camera(self) -> None:
