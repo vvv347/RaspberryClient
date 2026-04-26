@@ -9,13 +9,10 @@ import os
 import signal
 import struct
 import subprocess
-import sys
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-
-import cv2
 
 from dotenv import load_dotenv
 
@@ -32,7 +29,7 @@ def setup_logging(debug: bool = False) -> None:
 
 def load_config(path: str) -> dict:
     defaults = {
-        "camera_device": 0,
+        "camera_device": "/dev/video0",
         "interval": 5.0,
         "resolution": [1920, 1080],
         "output_dir": "output",
@@ -43,13 +40,12 @@ def load_config(path: str) -> dict:
         "webdav": {
             "hostname": "https://my-hdd-1.keenetic.link",
             "root": "/webdav/",
-            "remote_dir": "timelapse"
+            "remote_dir": "timelapse",
         },
     }
     if os.path.exists(path):
         with open(path) as f:
             data = json.load(f)
-        # Deep-merge webdav section
         if "webdav" in data:
             defaults["webdav"].update(data.pop("webdav"))
         defaults.update(data)
@@ -63,7 +59,7 @@ class TimelapseRecorder:
         self.frame_count = 0
         self.session_dir: Optional[Path] = None
         self.session_name: str = ""
-        self.cap: Optional[cv2.VideoCapture] = None
+        self.device: str = ""
         self.uploader: Optional[WebDAVUploader] = None
 
     def _setup_session(self) -> None:
@@ -76,29 +72,28 @@ class TimelapseRecorder:
         try:
             self.uploader = WebDAVUploader(self.config["webdav"])
             if not self.uploader.check_connection():
-                logging.warning("WebDAV unavailable — frames will be saved locally only")
+                logging.warning("WebDAV unavailable — saving locally only")
                 self.uploader = None
         except ValueError as exc:
             logging.warning("WebDAV disabled: %s", exc)
 
     @staticmethod
-    @staticmethod
     def _is_capture_device(path: str) -> bool:
-        """Check V4L2_CAP_VIDEO_CAPTURE via VIDIOC_QUERYCAP ioctl."""
-        # struct v4l2_capability: driver[16] + card[32] + bus_info[32] + version(4) + capabilities(4) = offset 84
+        """Return True if the V4L2 node supports VIDEO_CAPTURE (VIDIOC_QUERYCAP)."""
+        # struct v4l2_capability layout: driver[16] card[32] bus_info[32] version(4) capabilities(4)
         try:
             with open(path, "rb") as f:
                 buf = bytearray(104)
-                fcntl.ioctl(f, 0x80685600, buf)  # VIDIOC_QUERYCAP
+                fcntl.ioctl(f, 0x80685600, buf)          # VIDIOC_QUERYCAP
                 caps = struct.unpack_from("<I", buf, 84)[0]
-                return bool(caps & 0x00000001)    # V4L2_CAP_VIDEO_CAPTURE
+                return bool(caps & 0x00000001)             # V4L2_CAP_VIDEO_CAPTURE
         except OSError:
             return False
 
     @staticmethod
     def _find_camera_device(device) -> str:
         preferred = f"/dev/video{device}" if isinstance(device, int) else device
-        all_nodes = sorted(Path("/dev").glob("video*"))
+        all_nodes = sorted(Path("/dev").glob("video*"), key=lambda p: int(p.name[5:]))
         capture_nodes = [str(p) for p in all_nodes if TimelapseRecorder._is_capture_device(str(p))]
 
         if not capture_nodes:
@@ -109,40 +104,50 @@ class TimelapseRecorder:
             return preferred
 
         chosen = capture_nodes[0]
-        logging.warning("'%s' is not a capture device, using '%s'", preferred, chosen)
+        logging.warning("'%s' is not a capture device — using '%s'", preferred, chosen)
         return chosen
 
     def _open_camera(self) -> None:
-        device = self._find_camera_device(self.config["camera_device"])
-        self.cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
-        if not self.cap.isOpened():
-            raise RuntimeError(f"Cannot open camera: {device}")
-
+        self.device = self._find_camera_device(self.config["camera_device"])
         w, h = self.config["resolution"]
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        # Quick probe: capture one test frame to validate device + resolution
+        test_file = self.session_dir / ".probe.jpg"
+        result = subprocess.run(
+            self._ffmpeg_capture_cmd(str(test_file), w, h),
+            capture_output=True, timeout=10,
+        )
+        test_file.unlink(missing_ok=True)
+        if result.returncode != 0:
+            err = result.stderr.decode(errors="replace")[-400:]
+            raise RuntimeError(f"Camera probe failed on {self.device}:\n{err}")
+        logging.info("Camera ready: %s at %dx%d", self.device, w, h)
 
-        for _ in range(5):
-            self.cap.grab()
-
-        actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        logging.info("Camera opened at %dx%d", actual_w, actual_h)
+    def _ffmpeg_capture_cmd(self, output: str, w: int, h: int) -> list:
+        # ffmpeg JPEG -q:v scale: 1 (best) – 31 (worst)
+        q = max(1, round(31 * (100 - self.config["jpeg_quality"]) / 100))
+        return [
+            "ffmpeg", "-y",
+            "-f", "v4l2",
+            "-video_size", f"{w}x{h}",
+            "-i", self.device,
+            "-frames:v", "1",
+            "-q:v", str(q),
+            output,
+        ]
 
     def _capture_frame(self) -> bool:
-        self.cap.grab()
-        ret, frame = self.cap.retrieve()
-        if not ret or frame is None:
-            logging.warning("Failed to capture frame, skipping")
-            return False
-
         ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
         ext = self.config["frame_format"]
         filename = self.session_dir / f"frame_{self.frame_count:06d}_{ts}.{ext}"
+        w, h = self.config["resolution"]
 
-        params = [cv2.IMWRITE_JPEG_QUALITY, self.config["jpeg_quality"]] if ext in ("jpg", "jpeg") else []
-        cv2.imwrite(str(filename), frame, params)
+        result = subprocess.run(
+            self._ffmpeg_capture_cmd(str(filename), w, h),
+            capture_output=True, timeout=15,
+        )
+        if result.returncode != 0:
+            logging.warning("Frame capture failed, skipping")
+            return False
 
         self.frame_count += 1
         if self.frame_count % 10 == 0:
@@ -188,7 +193,7 @@ class TimelapseRecorder:
         logging.info("Compiling %d frames → %s", self.frame_count, output_video)
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
-            logging.error("ffmpeg failed:\n%s", result.stderr[-800:])
+            logging.error("ffmpeg compile failed:\n%s", result.stderr[-800:])
             return None
 
         logging.info("Video saved: %s", output_video)
@@ -219,8 +224,6 @@ class TimelapseRecorder:
             pass
         finally:
             logging.info("Stopped. Total frames: %d", self.frame_count)
-            if self.cap:
-                self.cap.release()
 
             video_path = None
             if self.config.get("compile_on_exit") and self.frame_count > 0:
@@ -236,21 +239,21 @@ class TimelapseRecorder:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Time-lapse recorder — Raspberry Pi 4 + LifeCam Studio")
-    parser.add_argument("--config", default="config.json", help="Path to config file")
-    parser.add_argument("--device", type=int, help="Camera device index (default: 0)")
+    parser.add_argument("--config", default="config.json")
+    parser.add_argument("--device", help="Camera device path (e.g. /dev/video2)")
     parser.add_argument("--interval", type=float, help="Seconds between frames")
     parser.add_argument("--output", help="Output directory")
     parser.add_argument("--fps", type=int, help="Output video FPS")
-    parser.add_argument("--no-compile", action="store_true", help="Skip video compilation on exit")
-    parser.add_argument("--no-webdav", action="store_true", help="Disable WebDAV upload")
-    parser.add_argument("--debug", action="store_true", help="Verbose logging")
+    parser.add_argument("--no-compile", action="store_true")
+    parser.add_argument("--no-webdav", action="store_true")
+    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
     load_dotenv()
     setup_logging(args.debug)
 
     config = load_config(args.config)
-    if args.device is not None:
+    if args.device:
         config["camera_device"] = args.device
     if args.interval is not None:
         config["interval"] = args.interval
