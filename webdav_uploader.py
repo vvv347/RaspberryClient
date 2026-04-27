@@ -28,12 +28,14 @@ class WebDAVUploader:
         self._remote_base = config.get("remote_dir", "timelapse").strip("/")
         self._queue: queue.Queue = queue.Queue()
         self._errors = 0
+        self._known_dirs: set[str] = set()
         self._thread = threading.Thread(target=self._worker, daemon=True, name="webdav")
         self._thread.start()
 
     def check_connection(self) -> bool:
         try:
             self._client.check(self._remote_base) or self._client.mkdir(self._remote_base)
+            self._known_dirs.add(self._remote_base)
             logging.info("WebDAV connected: %s/%s", self._client.webdav.hostname, self._remote_base)
             return True
         except Exception as exc:
@@ -45,9 +47,12 @@ class WebDAVUploader:
         current = ""
         for part in parts:
             current = f"{current}/{part}".lstrip("/")
+            if current in self._known_dirs:
+                continue
             try:
                 if not self._client.check(current):
                     self._client.mkdir(current)
+                self._known_dirs.add(current)
             except Exception:
                 pass
 
