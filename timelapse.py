@@ -9,6 +9,7 @@ import os
 import signal
 import struct
 import subprocess
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -34,9 +35,11 @@ def load_config(path: str) -> dict:
         "resolution": [1920, 1080],
         "output_dir": "output",
         "compile_on_exit": True,
+        "preview_interval": 30,
         "video_fps": 24,
         "frame_format": "jpg",
         "jpeg_quality": 95,
+        "warmup_frames": 10,
         "webdav": {
             "hostname": "https://my-hdd-1.keenetic.link",
             "root": "/webdav/",
@@ -61,6 +64,9 @@ class TimelapseRecorder:
         self.session_name: str = ""
         self.device: str = ""
         self.uploader: Optional[WebDAVUploader] = None
+        self._compile_lock = threading.Lock()
+        self._preview_count = 0
+        self._preview_thread: Optional[threading.Thread] = None
 
     def _setup_session(self) -> None:
         self.session_name = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -131,11 +137,10 @@ class TimelapseRecorder:
     def _open_camera(self) -> None:
         self.device = self._find_camera_device(self.config["camera_device"])
         w, h = self.config["resolution"]
-        # Quick probe: capture one test frame to validate device + resolution
         test_file = self.session_dir / ".probe.jpg"
         result = subprocess.run(
             self._ffmpeg_capture_cmd(str(test_file), w, h),
-            capture_output=True, timeout=10,
+            capture_output=True, timeout=15,
         )
         test_file.unlink(missing_ok=True)
         if result.returncode != 0:
@@ -144,10 +149,9 @@ class TimelapseRecorder:
         logging.info("Camera ready: %s at %dx%d", self.device, w, h)
 
     def _ffmpeg_capture_cmd(self, output: str, w: int, h: int) -> list:
-        # LifeCam Studio at 1080p requires MJPEG; YUYV tops out at 640x480
-        # Capture warmup_frames and keep the last one so AE has time to settle.
-        # -update 1 overwrites the same file each frame; final file = last frame.
-        # ffmpeg JPEG -q:v: 1 (best) – 31 (worst)
+        # LifeCam Studio at 1080p requires MJPEG; YUYV tops out at 640x480.
+        # -update 1 overwrites the same file each frame; final file = last frame
+        # so AE has warmup_frames to settle before we keep the result.
         q = max(1, round(31 * (100 - self.config["jpeg_quality"]) / 100))
         warmup = max(1, self.config.get("warmup_frames", 10))
         cmd = [
@@ -190,24 +194,14 @@ class TimelapseRecorder:
 
         return True
 
-    def _compile_video(self) -> Optional[Path]:
-        if self.frame_count == 0:
-            logging.warning("No frames to compile")
-            return None
-
-        ext = self.config["frame_format"]
-        frames = sorted(self.session_dir.glob(f"frame_*.{ext}"))
-        if not frames:
-            return None
-
-        list_file = self.session_dir / "frames.txt"
+    def _build_video(self, frames: list[Path], output: Path, list_file: Path) -> bool:
+        """Compile a list of frames into an MP4. Returns True on success."""
         frame_duration = 1.0 / self.config["video_fps"]
         with open(list_file, "w") as f:
             for fp in frames:
                 f.write(f"file '{fp.absolute()}'\n")
                 f.write(f"duration {frame_duration:.6f}\n")
 
-        output_video = Path(self.config["output_dir"]) / f"timelapse_{self.session_name}.mp4"
         cmd = [
             "ffmpeg", "-y",
             "-f", "concat", "-safe", "0",
@@ -217,17 +211,60 @@ class TimelapseRecorder:
             "-preset", "fast",
             "-crf", "18",
             "-pix_fmt", "yuv420p",
-            str(output_video),
+            str(output),
         ]
-
-        logging.info("Compiling %d frames → %s", self.frame_count, output_video)
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
-            logging.error("ffmpeg compile failed:\n%s", result.stderr[-800:])
+            logging.error("ffmpeg failed:\n%s", result.stderr[-800:])
+            return False
+        return True
+
+    def _compile_preview(self) -> None:
+        """Build an intermediate video from frames captured so far."""
+        ext = self.config["frame_format"]
+        frames = sorted(self.session_dir.glob(f"frame_*.{ext}"))
+        if not frames:
+            return
+
+        with self._compile_lock:
+            self._preview_count += 1
+            n = self._preview_count
+            output = Path(self.config["output_dir"]) / f"timelapse_{self.session_name}_preview_{n:03d}.mp4"
+            list_file = self.session_dir / f"frames_preview_{n:03d}.txt"
+
+            logging.info("Preview #%d: compiling %d frames → %s", n, len(frames), output.name)
+            if self._build_video(frames, output, list_file):
+                logging.info("Preview #%d saved: %s", n, output)
+                if self.uploader:
+                    self.uploader.upload_video(output)
+
+    def _preview_worker(self) -> None:
+        interval = self.config.get("preview_interval", 30)
+        while self.running:
+            # Sleep in small steps so stop() is noticed promptly
+            for _ in range(interval * 10):
+                if not self.running:
+                    return
+                time.sleep(0.1)
+            if self.running and self.frame_count > 0:
+                self._compile_preview()
+
+    def _compile_video(self) -> Optional[Path]:
+        """Final compilation on exit."""
+        ext = self.config["frame_format"]
+        frames = sorted(self.session_dir.glob(f"frame_*.{ext}"))
+        if not frames:
+            logging.warning("No frames to compile")
             return None
 
-        logging.info("Video saved: %s", output_video)
-        return output_video
+        with self._compile_lock:
+            output = Path(self.config["output_dir"]) / f"timelapse_{self.session_name}.mp4"
+            list_file = self.session_dir / "frames_final.txt"
+            logging.info("Final compile: %d frames → %s", len(frames), output)
+            if self._build_video(frames, output, list_file):
+                logging.info("Final video saved: %s", output)
+                return output
+        return None
 
     def stop(self) -> None:
         if not self.running:
@@ -241,7 +278,16 @@ class TimelapseRecorder:
         self.running = True
 
         interval = self.config["interval"]
-        logging.info("Recording every %.1fs — press Ctrl+C to stop", interval)
+        preview_interval = self.config.get("preview_interval", 30)
+        logging.info(
+            "Recording every %.1fs, preview every %ds — press Ctrl+C to stop",
+            interval, preview_interval,
+        )
+
+        self._preview_thread = threading.Thread(
+            target=self._preview_worker, daemon=True, name="preview"
+        )
+        self._preview_thread.start()
 
         try:
             while self.running:
@@ -253,7 +299,11 @@ class TimelapseRecorder:
         except KeyboardInterrupt:
             pass
         finally:
+            self.running = False
             logging.info("Stopped. Total frames: %d", self.frame_count)
+
+            if self._preview_thread:
+                self._preview_thread.join(timeout=5)
 
             video_path = None
             if self.config.get("compile_on_exit") and self.frame_count > 0:
@@ -272,6 +322,7 @@ def main() -> None:
     parser.add_argument("--config", default="config.json")
     parser.add_argument("--device", help="Camera device path (e.g. /dev/video2)")
     parser.add_argument("--interval", type=float, help="Seconds between frames")
+    parser.add_argument("--preview-interval", type=int, help="Seconds between preview videos")
     parser.add_argument("--output", help="Output directory")
     parser.add_argument("--fps", type=int, help="Output video FPS")
     parser.add_argument("--no-compile", action="store_true")
@@ -287,6 +338,8 @@ def main() -> None:
         config["camera_device"] = args.device
     if args.interval is not None:
         config["interval"] = args.interval
+    if args.preview_interval is not None:
+        config["preview_interval"] = args.preview_interval
     if args.output:
         config["output_dir"] = args.output
     if args.fps is not None:
