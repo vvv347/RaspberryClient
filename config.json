@@ -7,6 +7,7 @@
   "video_fps": 24,
   "frame_format": "jpg",
   "jpeg_quality": 95,
+  "warmup_frames": 10,
   "webdav": {
     "hostname": "https://my-hdd-1.keenetic.link",
     "root": "/webdav/",

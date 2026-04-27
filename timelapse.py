@@ -145,15 +145,19 @@ class TimelapseRecorder:
 
     def _ffmpeg_capture_cmd(self, output: str, w: int, h: int) -> list:
         # LifeCam Studio at 1080p requires MJPEG; YUYV tops out at 640x480
+        # Capture warmup_frames and keep the last one so AE has time to settle.
+        # -update 1 overwrites the same file each frame; final file = last frame.
         # ffmpeg JPEG -q:v: 1 (best) – 31 (worst)
         q = max(1, round(31 * (100 - self.config["jpeg_quality"]) / 100))
+        warmup = max(1, self.config.get("warmup_frames", 10))
         cmd = [
             "ffmpeg", "-y",
             "-f", "v4l2",
             "-input_format", self.config.get("v4l2_input_format", "mjpeg"),
             "-video_size", f"{w}x{h}",
             "-i", self.device,
-            "-frames:v", "1",
+            "-frames:v", str(warmup),
+            "-update", "1",
             "-q:v", str(q),
             output,
         ]
