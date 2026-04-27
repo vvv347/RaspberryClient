@@ -104,7 +104,7 @@ class TimelapseRecorder:
 
     @staticmethod
     def _find_camera_device(device) -> str:
-        preferred = f"/dev/video{device}" if isinstance(device, int) else device
+        preferred = f"/dev/video{device}" if isinstance(device, int) else device.strip("'\"").strip()
         all_nodes = sorted(Path("/dev").glob("video*"), key=lambda p: int(p.name[5:]))
 
         capture_nodes = [str(p) for p in all_nodes if TimelapseRecorder._is_capture_device(str(p))]
@@ -144,17 +144,21 @@ class TimelapseRecorder:
         logging.info("Camera ready: %s at %dx%d", self.device, w, h)
 
     def _ffmpeg_capture_cmd(self, output: str, w: int, h: int) -> list:
-        # ffmpeg JPEG -q:v scale: 1 (best) – 31 (worst)
+        # LifeCam Studio at 1080p requires MJPEG; YUYV tops out at 640x480
+        # ffmpeg JPEG -q:v: 1 (best) – 31 (worst)
         q = max(1, round(31 * (100 - self.config["jpeg_quality"]) / 100))
-        return [
+        cmd = [
             "ffmpeg", "-y",
             "-f", "v4l2",
+            "-input_format", self.config.get("v4l2_input_format", "mjpeg"),
             "-video_size", f"{w}x{h}",
             "-i", self.device,
             "-frames:v", "1",
             "-q:v", str(q),
             output,
         ]
+        logging.debug("Capture cmd: %s", " ".join(cmd))
+        return cmd
 
     def _capture_frame(self) -> bool:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
@@ -167,7 +171,8 @@ class TimelapseRecorder:
             capture_output=True, timeout=15,
         )
         if result.returncode != 0:
-            logging.warning("Frame capture failed, skipping")
+            err = result.stderr.decode(errors="replace")[-300:]
+            logging.warning("Frame capture failed:\n%s", err)
             return False
 
         self.frame_count += 1
