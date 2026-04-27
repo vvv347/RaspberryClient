@@ -174,10 +174,16 @@ class TimelapseRecorder:
         filename = self.session_dir / f"frame_{self.frame_count:06d}_{ts}.{ext}"
         w, h = self.config["resolution"]
 
-        result = subprocess.run(
-            self._ffmpeg_capture_cmd(str(filename), w, h),
-            capture_output=True, timeout=30,
-        )
+        try:
+            result = subprocess.run(
+                self._ffmpeg_capture_cmd(str(filename), w, h),
+                capture_output=True, timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            logging.warning("Frame capture timed out, skipping")
+            filename.unlink(missing_ok=True)
+            return False
+
         if result.returncode != 0:
             err = result.stderr.decode(errors="replace")[-300:]
             logging.warning("Frame capture failed:\n%s", err)
