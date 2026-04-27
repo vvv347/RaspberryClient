@@ -172,7 +172,7 @@ class TimelapseRecorder:
 
         result = subprocess.run(
             self._ffmpeg_capture_cmd(str(filename), w, h),
-            capture_output=True, timeout=15,
+            capture_output=True, timeout=30,
         )
         if result.returncode != 0:
             err = result.stderr.decode(errors="replace")[-300:]

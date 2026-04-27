@@ -1,13 +1,13 @@
 {
   "camera_device": "/dev/video0",
-  "interval": 5.0,
+  "interval": 2.0,
   "resolution": [1920, 1080],
   "output_dir": "output",
   "compile_on_exit": true,
   "video_fps": 24,
   "frame_format": "jpg",
   "jpeg_quality": 95,
-  "warmup_frames": 10,
+  "warmup_frames":20,
   "webdav": {
     "hostname": "https://my-hdd-1.keenetic.link",
     "root": "/webdav/",
